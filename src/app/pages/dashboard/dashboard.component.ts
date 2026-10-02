@@ -44,9 +44,9 @@ import {
         <small>需负责人顺序处理</small>
       </article>
       <article>
-        <span>执行中</span>
-        <strong>{{ countByStatus('executing') }}</strong>
-        <small>需持续记录偏离</small>
+        <span>执行中 / 暂停</span>
+        <strong>{{ executingCount() }}</strong>
+        <small>执行版本已冻结，需持续记录偏离</small>
       </article>
       <article class="danger">
         <span>有阻断项</span>
@@ -353,6 +353,12 @@ import {
         background: #e8f5ed;
       }
 
+      .status.paused {
+        border-color: #d0a251;
+        color: #7c5000;
+        background: #fff7e6;
+      }
+
       .status.submitted {
         border-color: #5688a5;
         color: #215a78;
@@ -471,6 +477,12 @@ export class DashboardComponent {
 
   countByStatus(status: ChangeStatus): number {
     return this.changes().filter((change) => change.status === status).length;
+  }
+
+  executingCount(): number {
+    return this.changes().filter(
+      (change) => change.status === 'executing' || change.status === 'paused',
+    ).length;
   }
 
   issueCount(changeId: string): number {

@@ -5,12 +5,12 @@ import { ClarityModule } from '@clr/angular';
 import { Store } from '@ngrx/store';
 import { ValidationPanelComponent } from '../../components/validation-panel/validation-panel.component';
 import {
-  APPROVAL_ORDER,
   ChangeRequest,
   ChangeStep,
   RESOURCE_LABELS,
   ResourceType,
   StepPhase,
+  createEmptyApprovals,
   createEmptyChange,
   validateChange,
 } from '../../models/change-request.model';
@@ -563,9 +563,9 @@ export class NewChangeComponent {
   }
 
   save(submit: boolean): void {
-    const draft = {
+    const draft: ChangeRequest = {
       ...this.draft(),
-      approvals: APPROVAL_ORDER.map((stage) => ({ stage, state: 'pending' as const })),
+      approvals: createEmptyApprovals(),
     };
     this.store.dispatch(ChangeRequestActions.createChange({ change: draft }));
     if (submit) {

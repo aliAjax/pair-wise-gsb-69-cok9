@@ -4,7 +4,11 @@
     "title": "华东一区核心交换网升级",
     "summary": "升级 A3/A4 机柜上联交换机固件，调整核心链路聚合参数。",
     "owner": "周启明",
-    "onCall": ["周启明", "林珂", "赵宇"],
+    "onCall": [
+      "周启明",
+      "林珂",
+      "赵宇"
+    ],
     "status": "submitted",
     "risk": "critical",
     "resources": [
@@ -20,21 +24,29 @@
         "name": "A3 机柜",
         "type": "rack",
         "critical": false,
-        "dependencies": ["dc-east-1"]
+        "dependencies": [
+          "dc-east-1"
+        ]
       },
       {
         "id": "sw-core-a",
         "name": "核心交换机 A",
         "type": "network",
         "critical": true,
-        "dependencies": ["rack-a3", "rack-a4"]
+        "dependencies": [
+          "rack-a3",
+          "rack-a4"
+        ]
       },
       {
         "id": "svc-orders",
         "name": "订单网关",
         "type": "service",
         "critical": true,
-        "dependencies": ["sw-core-a", "storage-prod"]
+        "dependencies": [
+          "sw-core-a",
+          "storage-prod"
+        ]
       }
     ],
     "steps": [
@@ -88,19 +100,23 @@
         "state": "approved",
         "approver": "陆成",
         "comment": "链路切换窗口和验证点符合要求。",
-        "decidedAt": "2026-09-29T02:15:00.000Z"
+        "decidedAt": "2026-09-29T02:15:00.000Z",
+        "round": 1
       },
       {
         "stage": "system",
-        "state": "pending"
+        "state": "pending",
+        "round": 1
       },
       {
         "stage": "security",
-        "state": "pending"
+        "state": "pending",
+        "round": 1
       },
       {
         "stage": "business",
-        "state": "pending"
+        "state": "pending",
+        "round": 1
       }
     ],
     "deviations": [],
@@ -121,14 +137,18 @@
       }
     ],
     "createdAt": "2026-09-27T08:20:00.000Z",
-    "updatedAt": "2026-09-29T02:15:00.000Z"
+    "updatedAt": "2026-09-29T02:15:00.000Z",
+    "version": 3
   },
   {
     "id": "CHG-24028",
     "title": "结算存储扩容",
     "summary": "为结算集群增加 2 个存储节点并在线迁移数据。",
     "owner": "陈若宁",
-    "onCall": ["陈若宁", "高巍"],
+    "onCall": [
+      "陈若宁",
+      "高巍"
+    ],
     "status": "executing",
     "risk": "high",
     "resources": [
@@ -137,21 +157,27 @@
         "name": "B2 机柜",
         "type": "rack",
         "critical": false,
-        "dependencies": ["dc-east-2"]
+        "dependencies": [
+          "dc-east-2"
+        ]
       },
       {
         "id": "storage-prod",
         "name": "结算生产存储",
         "type": "storage",
         "critical": true,
-        "dependencies": ["rack-b2"]
+        "dependencies": [
+          "rack-b2"
+        ]
       },
       {
         "id": "svc-settle",
         "name": "结算服务",
         "type": "service",
         "critical": true,
-        "dependencies": ["storage-prod"]
+        "dependencies": [
+          "storage-prod"
+        ]
       }
     ],
     "steps": [
@@ -205,28 +231,32 @@
         "state": "frozen",
         "approver": "陆成",
         "comment": "机柜上联端口无冲突。",
-        "decidedAt": "2026-09-28T06:10:00.000Z"
+        "decidedAt": "2026-09-28T06:10:00.000Z",
+        "round": 1
       },
       {
         "stage": "system",
         "state": "frozen",
         "approver": "宋海",
         "comment": "容量和回滚步骤符合要求。",
-        "decidedAt": "2026-09-28T07:32:00.000Z"
+        "decidedAt": "2026-09-28T07:32:00.000Z",
+        "round": 1
       },
       {
         "stage": "security",
         "state": "frozen",
         "approver": "王珊",
         "comment": "数据不落新区域，同意执行。",
-        "decidedAt": "2026-09-28T08:04:00.000Z"
+        "decidedAt": "2026-09-28T08:04:00.000Z",
+        "round": 1
       },
       {
         "stage": "business",
         "state": "frozen",
         "approver": "韩璐",
         "comment": "夜间结算批次已延期。",
-        "decidedAt": "2026-09-28T08:40:00.000Z"
+        "decidedAt": "2026-09-28T08:40:00.000Z",
+        "round": 1
       }
     ],
     "deviations": [
@@ -235,7 +265,8 @@
         "recordedAt": "2026-09-29T00:42:00.000Z",
         "owner": "陈若宁",
         "description": "node-b2-08 上线速度低于基线，暂停重平衡并检查网卡。",
-        "decision": "pause"
+        "decision": "pause",
+        "eventId": "evt-24028-pause-1"
       }
     ],
     "audit": [
@@ -255,14 +286,18 @@
       }
     ],
     "createdAt": "2026-09-26T03:22:00.000Z",
-    "updatedAt": "2026-09-29T00:42:00.000Z"
+    "updatedAt": "2026-09-29T00:42:00.000Z",
+    "version": 6
   },
   {
     "id": "CHG-24022",
     "title": "风控规则引擎证书轮换",
     "summary": "轮换风控网关双向 TLS 证书并更新调用方信任链。",
     "owner": "许月",
-    "onCall": ["许月", "李承"],
+    "onCall": [
+      "许月",
+      "李承"
+    ],
     "status": "draft",
     "risk": "medium",
     "resources": [
@@ -319,19 +354,23 @@
     "approvals": [
       {
         "stage": "network",
-        "state": "pending"
+        "state": "pending",
+        "round": 1
       },
       {
         "stage": "system",
-        "state": "pending"
+        "state": "pending",
+        "round": 1
       },
       {
         "stage": "security",
-        "state": "pending"
+        "state": "pending",
+        "round": 1
       },
       {
         "stage": "business",
-        "state": "pending"
+        "state": "pending",
+        "round": 1
       }
     ],
     "deviations": [],
@@ -345,14 +384,17 @@
       }
     ],
     "createdAt": "2026-09-28T11:32:00.000Z",
-    "updatedAt": "2026-09-28T11:32:00.000Z"
+    "updatedAt": "2026-09-28T11:32:00.000Z",
+    "version": 5
   },
   {
     "id": "CHG-24018",
     "title": "日志平台索引模板切换",
     "summary": "切换日志平台索引模板并保留双写 24 小时。",
     "owner": "杜衡",
-    "onCall": ["杜衡"],
+    "onCall": [
+      "杜衡"
+    ],
     "status": "completed",
     "risk": "low",
     "resources": [
@@ -397,28 +439,32 @@
         "state": "frozen",
         "approver": "陆成",
         "comment": "无网络影响。",
-        "decidedAt": "2026-09-26T05:20:00.000Z"
+        "decidedAt": "2026-09-26T05:20:00.000Z",
+        "round": 1
       },
       {
         "stage": "system",
         "state": "frozen",
         "approver": "宋海",
         "comment": "同意执行。",
-        "decidedAt": "2026-09-26T05:42:00.000Z"
+        "decidedAt": "2026-09-26T05:42:00.000Z",
+        "round": 1
       },
       {
         "stage": "security",
         "state": "frozen",
         "approver": "王珊",
         "comment": "日志字段无新增敏感项。",
-        "decidedAt": "2026-09-26T06:01:00.000Z"
+        "decidedAt": "2026-09-26T06:01:00.000Z",
+        "round": 1
       },
       {
         "stage": "business",
         "state": "frozen",
         "approver": "韩璐",
         "comment": "窗口不影响在售业务。",
-        "decidedAt": "2026-09-26T06:14:00.000Z"
+        "decidedAt": "2026-09-26T06:14:00.000Z",
+        "round": 1
       }
     ],
     "deviations": [],
@@ -432,6 +478,158 @@
       }
     ],
     "createdAt": "2026-09-25T08:00:00.000Z",
-    "updatedAt": "2026-09-27T03:05:00.000Z"
+    "updatedAt": "2026-09-27T03:05:00.000Z",
+    "version": 6
+  },
+  {
+    "id": "CHG-24035",
+    "title": "结算库只读副本参数调整",
+    "summary": "调整结算存储只读副本的压缩与缓存参数，窗口紧邻结算存储扩容。",
+    "owner": "高巍",
+    "onCall": [
+      "高巍",
+      "陈若宁"
+    ],
+    "status": "submitted",
+    "risk": "high",
+    "resources": [
+      {
+        "id": "storage-prod",
+        "name": "结算生产存储",
+        "type": "storage",
+        "critical": true,
+        "dependencies": [
+          "rack-b2"
+        ]
+      },
+      {
+        "id": "svc-report",
+        "name": "报表只读服务",
+        "type": "service",
+        "critical": false,
+        "dependencies": [
+          "storage-prod"
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "id": "step-1",
+        "phase": "prepare",
+        "title": "确认只读副本延迟基线",
+        "owner": "高巍",
+        "durationMinutes": 15,
+        "command": "storagecli replica lag --target storage-prod",
+        "completed": false
+      },
+      {
+        "id": "step-2",
+        "phase": "execute",
+        "title": "应用压缩与缓存参数",
+        "owner": "高巍",
+        "durationMinutes": 25,
+        "command": "storagecli params apply --plan report-replica.yaml",
+        "completed": false
+      },
+      {
+        "id": "step-r1",
+        "phase": "rollback",
+        "title": "回滚参数到上一个版本",
+        "owner": "高巍",
+        "durationMinutes": 20,
+        "command": "storagecli params rollback --plan report-replica.yaml",
+        "completed": false
+      }
+    ],
+    "window": {
+      "start": "2026-09-29T03:00",
+      "end": "2026-09-29T05:00",
+      "observationWindowMinutes": 30,
+      "blackoutProtected": false
+    },
+    "approvals": [
+      {
+        "stage": "network",
+        "state": "invalidated",
+        "round": 1,
+        "approver": "陆成",
+        "comment": "副本链路不涉及网络变更，同意。",
+        "decidedAt": "2026-09-28T09:10:00.000Z",
+        "invalidatedAt": "2026-09-29T00:42:00.000Z",
+        "invalidatedReason": "关联变更执行暂停",
+        "invalidatedByChangeId": "CHG-24028",
+        "invalidatedByEventId": "evt-24028-pause-1"
+      },
+      {
+        "stage": "system",
+        "state": "invalidated",
+        "round": 1,
+        "approver": "宋海",
+        "comment": "参数变更有回滚路径。",
+        "decidedAt": "2026-09-28T09:30:00.000Z",
+        "invalidatedAt": "2026-09-29T00:42:00.000Z",
+        "invalidatedReason": "关联变更执行暂停",
+        "invalidatedByChangeId": "CHG-24028",
+        "invalidatedByEventId": "evt-24028-pause-1"
+      },
+      {
+        "stage": "security",
+        "state": "invalidated",
+        "round": 1,
+        "invalidatedAt": "2026-09-29T00:42:00.000Z",
+        "invalidatedReason": "关联变更执行暂停",
+        "invalidatedByChangeId": "CHG-24028",
+        "invalidatedByEventId": "evt-24028-pause-1"
+      },
+      {
+        "stage": "business",
+        "state": "invalidated",
+        "round": 1,
+        "invalidatedAt": "2026-09-29T00:42:00.000Z",
+        "invalidatedReason": "关联变更执行暂停",
+        "invalidatedByChangeId": "CHG-24028",
+        "invalidatedByEventId": "evt-24028-pause-1"
+      },
+      {
+        "stage": "network",
+        "state": "pending",
+        "round": 2
+      },
+      {
+        "stage": "system",
+        "state": "pending",
+        "round": 2
+      },
+      {
+        "stage": "security",
+        "state": "pending",
+        "round": 2
+      },
+      {
+        "stage": "business",
+        "state": "pending",
+        "round": 2
+      }
+    ],
+    "deviations": [],
+    "audit": [
+      {
+        "id": "audit-24035-1",
+        "timestamp": "2026-09-29T00:42:00.000Z",
+        "actor": "陈若宁",
+        "action": "关联审批失效",
+        "detail": "共享资源 结算生产存储：关联变更执行暂停，原第 1 轮 4 个会签节点失效，自网络负责人起重新会签。"
+      },
+      {
+        "id": "audit-24035-0",
+        "timestamp": "2026-09-28T09:00:00.000Z",
+        "actor": "高巍",
+        "action": "提交审批",
+        "detail": "方案冻结后进入网络、系统、安全、业务顺序会签。"
+      }
+    ],
+    "version": 4,
+    "createdAt": "2026-09-28T08:50:00.000Z",
+    "updatedAt": "2026-09-29T00:42:00.000Z"
   }
 ]

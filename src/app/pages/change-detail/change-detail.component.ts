@@ -15,20 +15,30 @@ import { DependencyGraphComponent } from '../../components/dependency-graph/depe
 import { ValidationPanelComponent } from '../../components/validation-panel/validation-panel.component';
 import { WindowGanttComponent } from '../../components/window-gantt/window-gantt.component';
 import {
+  ApprovalRecord,
   ApprovalStage,
   ChangeRequest,
   ChangeStep,
-  DeviationRecord,
+  DECISION_LABELS,
+  DeviationDecision,
   PHASE_LABELS,
   RESOURCE_LABELS,
   RISK_LABELS,
   STAGE_LABELS,
   STATUS_LABELS,
+  activeApprovals,
+  causedInvalidations,
+  invalidatedApprovals,
+  isExecutionFrozen,
+  nextPendingStage,
   validateChange,
 } from '../../models/change-request.model';
 import { ChangeRequestService } from '../../services/change-request.service';
 import { ChangeRequestActions } from '../../store/change-request.actions';
-import { selectAllChanges } from '../../store/change-request.selectors';
+import {
+  selectAllChanges,
+  selectSaveConflictById,
+} from '../../store/change-request.selectors';
 
 type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval' | 'audit';
 
@@ -48,6 +58,23 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
   ],
   template: `
     @if (change(); as item) {
+      @if (saveConflict(); as conflict) {
+        <clr-alert clrAlertType="warning" [clrAlertClosable]="true" (clrAlertClosedChange)="dismissConflict()">
+          <clr-alert-item>
+            <span class="alert-text">
+              {{ conflict.reason === 'frozen' ? '执行版本已冻结，保存被拒绝' : '保存失败：另一个窗口已保存更新版本' }}
+              （当前有效版本 v{{ conflict.currentVersion }}
+              @if (conflict.attemptedVersion !== undefined) {
+                ，本次基线 v{{ conflict.attemptedVersion }}
+              }）。
+              <button class="btn btn-sm btn-warning-outline" type="button" (click)="recoverFromConflict()">
+                放弃编辑并恢复最近有效执行版本
+              </button>
+            </span>
+          </clr-alert-item>
+        </clr-alert>
+      }
+
       <section class="detail-heading">
         <div class="heading-main">
           <a routerLink="/" class="back-link">返回变更队列</a>
@@ -57,6 +84,7 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               <h1>{{ item.title }}</h1>
             </div>
             <span class="status" [class]="item.status">{{ statusLabel(item.status) }}</span>
+            <span class="version-tag">v{{ item.version }}</span>
           </div>
           <p>{{ item.summary || '尚未填写变更摘要。' }}</p>
         </div>
@@ -104,11 +132,18 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   class="btn btn-sm"
                   type="button"
                   (click)="editing() ? cancelEdit() : beginEdit()"
-                  [disabled]="item.status === 'executing' || item.status === 'completed'"
+                  [disabled]="frozen()"
                 >
-                  {{ editing() ? '取消编辑' : '编辑方案' }}
+                  {{ editing() ? '取消编辑' : frozen() ? '执行版本已冻结' : '编辑方案' }}
                 </button>
               </div>
+
+              @if (frozen(); as snapshot) {
+                <div class="frozen-banner">
+                  <strong>执行版本已冻结（v{{ snapshot.version }}，{{ snapshot.frozenAt | date: 'yyyy-MM-dd HH:mm' }} 冻结）</strong>
+                  <p>执行开始时方案和会签已固化，概览、执行和复盘一律以冻结版本为准；窗口和资源不允许再修改。</p>
+                </div>
+              }
 
               @if (editing()) {
                 <div class="edit-form">
@@ -167,13 +202,19 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   <div>
                     <dt>执行窗口</dt>
                     <dd>
-                      {{ item.window.start | date: 'yyyy-MM-dd HH:mm' }} 至
-                      {{ item.window.end | date: 'yyyy-MM-dd HH:mm' }}
+                      @if (frozen()) {
+                        <span class="frozen-note">{{ frozenWindow(item).start | date: 'yyyy-MM-dd HH:mm' }} 至
+                        {{ frozenWindow(item).end | date: 'yyyy-MM-dd HH:mm' }}
+                        <small>（冻结版本）</small></span>
+                      } @else {
+                        {{ item.window.start | date: 'yyyy-MM-dd HH:mm' }} 至
+                        {{ item.window.end | date: 'yyyy-MM-dd HH:mm' }}
+                      }
                     </dd>
                   </div>
                   <div>
                     <dt>观察窗口</dt>
-                    <dd>{{ item.window.observationWindowMinutes }} 分钟</dd>
+                    <dd>{{ frozenWindow(item).observationWindowMinutes }} 分钟</dd>
                   </div>
                   <div>
                     <dt>值守人员</dt>
@@ -193,11 +234,11 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               <div class="surface-heading">
                 <div>
                   <h2>资源清单</h2>
-                  <span>{{ item.resources.length }} 个对象，明确关键资源依赖</span>
+                  <span>{{ (frozen()?.resources.length ?? item.resources.length) }} 个对象，明确关键资源依赖</span>
                 </div>
               </div>
               <div class="resource-table">
-                @for (resource of item.resources; track resource.id) {
+                @for (resource of (frozen()?.resources ?? item.resources); track resource.id) {
                   <article>
                     <span class="type">{{ resourceLabel(resource.type) }}</span>
                     <div>
@@ -220,7 +261,7 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
             <div class="surface-heading">
               <div>
                 <h2>依赖关系图</h2>
-                <span>虚线表示依赖资源未纳入本次影响范围</span>
+                <span>虚线表示依赖资源未纳入本次影响范围；执行中以冻结版本为准</span>
               </div>
             </div>
             <app-dependency-graph [change]="item" />
@@ -236,6 +277,13 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               </div>
             </div>
             <app-window-gantt [changes]="changes()" [selectedId]="item.id" />
+            @if (frozen()) {
+              <div class="frozen-banner compact">
+                冻结窗口：{{ frozenWindow(item).start | date: 'yyyy-MM-dd HH:mm' }} 至
+                {{ frozenWindow(item).end | date: 'yyyy-MM-dd HH:mm' }}。
+                其他页面修改窗口不会影响执行版本。
+              </div>
+            }
             <div class="conflict-notes">
               @for (issue of issues(); track issue.id) {
                 @if (issue.code === 'WINDOW_CONFLICT') {
@@ -262,10 +310,16 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                 </div>
                 @if (item.status === 'approved') {
                   <button class="btn btn-primary" type="button" (click)="startExecution()">
-                    开始执行
+                    开始执行并冻结版本
                   </button>
                 }
+                @if (item.status === 'paused') {
+                  <span class="status paused">执行已暂停 · 步骤锁定</span>
+                }
               </div>
+              @if (frozen()) {
+                <p class="frozen-note">步骤来自冻结执行版本 v{{ item.executionSnapshot?.version }}。</p>
+              }
               <div class="step-list">
                 @for (step of stepsBy(item); track step.id) {
                   <label class="step-row" [class.completed]="step.completed">
@@ -292,22 +346,22 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               <div class="surface-heading">
                 <div>
                   <h2>实时执行记录</h2>
-                  <span>记录偏离并明确继续、暂停或回滚</span>
+                  <span>记录处置决定并明确继续、暂停或回滚</span>
                 </div>
                 <a class="btn btn-sm" href="https://logs.example.internal/change/{{ item.id }}" target="_blank" rel="noopener">
                   打开实时日志
                 </a>
               </div>
-              @if (item.status === 'executing') {
+              @if (item.status === 'executing' || item.status === 'paused') {
                 <div class="deviation-form">
                   <clr-textarea-container>
-                    <label>偏离说明</label>
+                    <label>处置说明</label>
                     <textarea
                       clrTextarea
                       rows="3"
                       [ngModel]="deviationText()"
                       (ngModelChange)="deviationText.set($event)"
-                      placeholder="描述实际执行与方案差异"
+                      [placeholder]="item.status === 'paused' ? '说明恢复条件或回滚依据' : '描述实际执行与方案差异'"
                     ></textarea>
                   </clr-textarea-container>
                   <div class="deviation-actions">
@@ -318,13 +372,25 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                         [ngModel]="deviationDecision()"
                         (ngModelChange)="deviationDecision.set($event)"
                       >
-                        <option value="continue">继续观察</option>
-                        <option value="pause">暂停执行</option>
-                        <option value="rollback">立即回滚</option>
+                        @if (item.status === 'executing') {
+                          <option value="continue">继续观察</option>
+                          <option value="pause">暂停执行</option>
+                          <option value="rollback">立即回滚</option>
+                        } @else {
+                          <option value="resume">继续执行</option>
+                          <option value="rollback">立即回滚</option>
+                        }
                       </select>
                     </clr-select-container>
-                    <button class="btn" type="button" (click)="recordDeviation()">记录偏离</button>
+                    <button class="btn" type="button" (click)="recordDecision()">
+                      {{ decisionButtonLabel() }}
+                    </button>
                   </div>
+                  @if (deviationDecision() === 'pause' || deviationDecision() === 'rollback') {
+                    <p class="cascade-hint">
+                      记录后，共享资源上尚未开始的关联变更审批将失效，需重新会签确认。
+                    </p>
+                  }
                 </div>
                 <div class="completion-actions">
                   <button class="btn" type="button" (click)="complete('rolled_back')">判定回滚</button>
@@ -335,18 +401,32 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               }
               <div class="deviation-list">
                 @for (deviation of item.deviations; track deviation.id) {
-                  <article>
+                  <article [class.pause-decision]="deviation.decision === 'pause'">
                     <div>
                       <strong>{{ deviation.owner }}</strong>
                       <time>{{ deviation.recordedAt | date: 'MM-dd HH:mm' }}</time>
                     </div>
                     <p>{{ deviation.description }}</p>
-                    <span>{{ decisionLabel(deviation.decision) }}</span>
+                    <span [class]="'decision-' + deviation.decision">{{ decisionLabel(deviation.decision) }}</span>
                   </article>
                 } @empty {
                   <p class="empty">尚无执行偏离。</p>
                 }
               </div>
+
+              @if (cascadedChanges().length) {
+                <div class="cascade-panel">
+                  <h3>本变更暂停/回滚导致审批失效的关联变更</h3>
+                  <ul>
+                    @for (related of cascadedChanges(); track related.id) {
+                      <li>
+                        <a [routerLink]="['/changes', related.id]">{{ related.id }} {{ related.title }}</a>
+                        <span>失效节点：{{ invalidatedStageLabels(related) || '全部会签' }}</span>
+                      </li>
+                    }
+                  </ul>
+                </div>
+              }
             </section>
           </div>
         }
@@ -357,7 +437,7 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               <div class="surface-heading">
                 <div>
                   <h2>顺序会签</h2>
-                  <span>必须按网络、系统、安全、业务顺序完成</span>
+                  <span>必须按网络、系统、安全、业务顺序完成；以当前有效轮次为准</span>
                 </div>
                 @if (item.status === 'draft' || item.status === 'rejected') {
                   <button
@@ -370,8 +450,30 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   </button>
                 }
               </div>
+
+              @if (historyApprovals().length) {
+                <div class="round-history">
+                  <h3>已失效的历史会签（不再有效）</h3>
+                  <ol class="approval-flow invalidated">
+                    @for (approval of historyApprovals(); track approval.stage + '-' + approval.round) {
+                      <li [ngClass]="approval.state">
+                        <span class="flow-index">{{ approval.round }}</span>
+                        <div>
+                          <strong>{{ stageLabel(approval.stage) }} · 第 {{ approval.round }} 轮</strong>
+                          <p>{{ approval.invalidatedReason || '因关联变更暂停或回滚失效' }}</p>
+                          <small>
+                            触发变更 {{ approval.invalidatedByChangeId }} ·
+                            {{ approval.invalidatedAt | date: 'MM-dd HH:mm' }}
+                          </small>
+                        </div>
+                      </li>
+                    }
+                  </ol>
+                </div>
+              }
+
               <ol class="approval-flow">
-                @for (approval of item.approvals; track approval.stage) {
+                @for (approval of activeFlow(); track approval.stage) {
                   <li [ngClass]="approval.state">
                     <span class="flow-index">{{ $index + 1 }}</span>
                     <div>
@@ -394,7 +496,7 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               <div class="surface-heading">
                 <div>
                   <h2>会签操作</h2>
-                  <span>只有当前顺位负责人可以签署</span>
+                  <span>只有当前有效轮次的当前顺位负责人可以签署</span>
                 </div>
               </div>
               @if (pendingStage(); as stage) {
@@ -427,10 +529,12 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                 } @else {
                   <p class="empty">当前状态不允许审批操作。</p>
                 }
-              } @else {
+              } @else if (frozen()) {
                 <p class="approved-message">
-                  会签已完成。开始执行后审批记录自动冻结，不允许修改。
+                  会签已随执行开始冻结，以下冻结快照是唯一有效批准，交接时无需再辨认历史审批。
                 </p>
+              } @else {
+                <p class="approved-message">会签已完成，等待开始执行冻结。</p>
               }
             </section>
 
@@ -441,11 +545,20 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   <span>执行与复盘以冻结版本为准</span>
                 </div>
               </div>
+              @if (frozen()) {
+                <p class="frozen-note">
+                  冻结于 {{ item.executionSnapshot?.frozenAt | date: 'yyyy-MM-dd HH:mm' }}，
+                  执行版本 v{{ item.executionSnapshot?.version }}。执行开始后审批页不能再修改窗口或会签。
+                </p>
+              }
               <div class="freeze-strip">
-                @for (approval of item.approvals; track approval.stage) {
+                @for (approval of freezeStrip(); track approval.stage + '-' + approval.round) {
                   <div>
                     <span>{{ stageLabel(approval.stage) }}</span>
                     <strong>{{ approvalStateText(approval.state) }}</strong>
+                    @if (approval.approver) {
+                      <small>{{ approval.approver }}</small>
+                    }
                   </div>
                 }
               </div>
@@ -459,7 +572,7 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               <div class="surface-heading">
                 <div>
                   <h2>审计轨迹</h2>
-                  <span>创建、编辑、会签、执行和回滚均记录</span>
+                  <span>创建、编辑、会签、冻结、暂停、继续和回滚均记录</span>
                 </div>
                 <button class="btn btn-sm" type="button" (click)="exportRetrospective()">
                   导出复盘记录
@@ -480,8 +593,12 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   <dd>{{ statusLabel(item.status) }}</dd>
                 </div>
                 <div>
-                  <dt>执行偏离</dt>
-                  <dd>{{ item.deviations.length }} 条</dd>
+                  <dt>执行版本</dt>
+                  <dd>v{{ frozen()?.version ?? item.version }}{{ frozen() ? '（已冻结）' : '' }}</dd>
+                </div>
+                <div>
+                  <dt>执行过程记录</dt>
+                  <dd>{{ item.deviations.length }} 条（暂停/继续/回滚）</dd>
                 </div>
                 <div>
                   <dt>审计事件</dt>
@@ -489,12 +606,52 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                 </div>
                 <div>
                   <dt>完成步骤</dt>
-                  <dd>{{ completedSteps(item) }} / {{ item.steps.length }}</dd>
+                  <dd>{{ completedSteps(item) }} / {{ (frozen()?.steps.length ?? item.steps.length) }}</dd>
+                </div>
+                <div>
+                  <dt>失效审批</dt>
+                  <dd>{{ historyApprovals().length }} 个节点</dd>
                 </div>
               </dl>
+
+              <div class="retro-block">
+                <h3>本变更的失效审批</h3>
+                @if (historyApprovals().length) {
+                  <ul class="retro-list">
+                    @for (approval of historyApprovals(); track approval.stage + '-' + approval.round) {
+                      <li>
+                        第 {{ approval.round }} 轮 {{ stageLabel(approval.stage) }}：
+                        {{ approval.invalidatedReason || '关联变更暂停或回滚' }}，
+                        触发变更 {{ approval.invalidatedByChangeId }}
+                        （{{ approval.invalidatedAt | date: 'MM-dd HH:mm' }}）
+                      </li>
+                    }
+                  </ul>
+                } @else {
+                  <p class="empty">无失效审批。</p>
+                }
+              </div>
+
+              <div class="retro-block">
+                <h3>受影响的关联变更</h3>
+                @if (cascadedChanges().length) {
+                  <ul class="retro-list">
+                    @for (related of cascadedChanges(); track related.id) {
+                      <li>
+                        <a [routerLink]="['/changes', related.id]">{{ related.id }} {{ related.title }}</a>：
+                        共享资源 {{ sharedResourceNames(related) }}，失效节点
+                        {{ invalidatedStageLabels(related) || '全部会签' }}，需重新确认。
+                      </li>
+                    }
+                  </ul>
+                } @else {
+                  <p class="empty">无关联变更受影响。</p>
+                }
+              </div>
+
               <div class="retrospective-note">
                 <strong>导出内容</strong>
-                <p>包含变更窗口、资源范围、执行偏离、最终状态和完整审计轨迹。</p>
+                <p>包含冻结方案与会签快照、执行窗口、暂停/继续/回滚过程、失效审批、受影响关联变更和完整审计轨迹。</p>
               </div>
             </section>
           </div>
@@ -543,6 +700,13 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
       h1 {
         margin: 2px 0 0;
         font-size: 28px;
+      }
+
+      .version-tag {
+        padding: 2px 8px;
+        background: #eef3f6;
+        color: #205d7e;
+        font-size: 11px;
       }
 
       .heading-main > p {
@@ -605,11 +769,46 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
         color: #245f3d;
       }
 
+      .status.paused {
+        border-color: #d0a251;
+        background: #fff7e6;
+        color: #7c5000;
+      }
+
       .status.rejected,
       .status.rolled_back {
         border-color: #d58d7e;
         background: #fbece8;
         color: #8e260f;
+      }
+
+      .frozen-banner {
+        margin-top: 16px;
+        padding: 14px 16px;
+        border-left: 3px solid #205d7e;
+        background: #eaf4f9;
+      }
+
+      .frozen-banner.compact {
+        margin: 14px 0 0;
+        font-size: 12px;
+        color: #1d5877;
+      }
+
+      .frozen-banner p {
+        margin: 6px 0 0;
+        color: #355a6e;
+        font-size: 12px;
+      }
+
+      .frozen-note {
+        margin: 10px 0;
+        color: #205d7e;
+        font-size: 12px;
+      }
+
+      .frozen-note small {
+        color: #5b7f93;
       }
 
       .tab-nav {
@@ -814,6 +1013,14 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
         align-items: end;
       }
 
+      .cascade-hint {
+        margin: 10px 0 0;
+        padding: 10px 12px;
+        background: #fff7e6;
+        color: #7c5000;
+        font-size: 12px;
+      }
+
       .deviation-list article {
         padding: 12px 0;
         border-bottom: 1px solid #e6e6e6;
@@ -829,8 +1036,65 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
       }
 
       .deviation-list span {
-        color: #8e260f;
+        display: inline-block;
+        width: fit-content;
+        padding: 2px 7px;
         font-size: 11px;
+        background: #edf3f6;
+        color: #205d7e;
+      }
+
+      .deviation-list span.decision-pause,
+      .deviation-list span.decision-rollback {
+        background: #fbece8;
+        color: #8e260f;
+      }
+
+      .deviation-list span.decision-resume {
+        background: #edf7f0;
+        color: #245f3d;
+      }
+
+      .cascade-panel {
+        margin-top: 16px;
+        padding: 14px;
+        background: #faf7f2;
+        border-left: 3px solid #d0a251;
+      }
+
+      .cascade-panel h3 {
+        margin: 0 0 8px;
+        font-size: 13px;
+      }
+
+      .cascade-panel ul,
+      .retro-list {
+        margin: 0;
+        padding-left: 18px;
+      }
+
+      .cascade-panel li {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 4px 0;
+        font-size: 12px;
+      }
+
+      .cascade-panel span {
+        color: #7c5000;
+      }
+
+      .round-history {
+        margin: 16px 0 8px;
+        padding: 12px 14px;
+        background: #faf3f1;
+      }
+
+      .round-history h3 {
+        margin: 0 0 8px;
+        font-size: 13px;
+        color: #8e260f;
       }
 
       .approval-flow {
@@ -865,6 +1129,16 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
       .approval-flow li.rejected .flow-index {
         border-color: #c21d00;
         background: #fbece8;
+        color: #8e260f;
+      }
+
+      .approval-flow.invalidated li {
+        opacity: 0.85;
+      }
+
+      .approval-flow li.invalidated .flow-index {
+        border-color: #b98a7e;
+        background: #f6e6e1;
         color: #8e260f;
       }
 
@@ -911,6 +1185,26 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
 
       .freeze-strip strong {
         margin-top: 4px;
+      }
+
+      .freeze-strip small {
+        color: #737373;
+        font-size: 11px;
+      }
+
+      .retro-block {
+        margin-top: 18px;
+      }
+
+      .retro-block h3 {
+        margin: 0 0 8px;
+        font-size: 14px;
+      }
+
+      .retro-list li {
+        padding: 5px 0;
+        color: #4c4c4c;
+        font-size: 13px;
       }
 
       .retrospective-note {
@@ -980,13 +1274,16 @@ export class ChangeDetailComponent {
 
   readonly changes = this.store.selectSignal(selectAllChanges);
   readonly change = computed(() => this.changes().find((item) => item.id === this.changeId));
+  readonly saveConflict = this.store.selectSignal(selectSaveConflictById(this.changeId));
   readonly selectedTab = signal<DetailTab>('overview');
   readonly editing = signal(false);
   readonly draft = signal<ChangeRequest | null>(null);
+  /** 编辑器打开时的基线版本；保存时携带，用于拒绝过期覆盖。 */
+  readonly editBaseVersion = signal<number | null>(null);
   readonly approver = signal('');
   readonly approvalComment = signal('');
   readonly deviationText = signal('');
-  readonly deviationDecision = signal<DeviationRecord['decision']>('continue');
+  readonly deviationDecision = signal<DeviationDecision>('continue');
 
   readonly tabs: Array<{ id: DetailTab; label: string }> = [
     { id: 'overview', label: '方案概览' },
@@ -1006,30 +1303,74 @@ export class ChangeDetailComponent {
     this.issues().some((issue) => issue.severity === 'blocker'),
   );
 
+  readonly frozen = computed(() => this.change()?.executionSnapshot ?? null);
+
   readonly pendingStage = computed<ApprovalStage | null>(() => {
     const item = this.change();
-    if (!item || !['submitted', 'rejected'].includes(item.status)) {
-      return null;
+    return item ? nextPendingStage(item) : null;
+  });
+
+  readonly activeFlow = computed<ApprovalRecord[]>(() => {
+    const item = this.change();
+    return item ? activeApprovals(item) : [];
+  });
+
+  readonly historyApprovals = computed<ApprovalRecord[]>(() => {
+    const item = this.change();
+    return item ? invalidatedApprovals(item) : [];
+  });
+
+  readonly cascadedChanges = computed<ChangeRequest[]>(() => {
+    const item = this.change();
+    return item ? causedInvalidations(item, this.changes()) : [];
+  });
+
+  readonly freezeStrip = computed<ApprovalRecord[]>(() => {
+    const item = this.change();
+    if (!item) {
+      return [];
     }
-    const rejected = item.approvals.find((approval) => approval.state === 'rejected');
-    if (rejected) {
-      return rejected.stage;
+    if (item.executionSnapshot) {
+      return item.executionSnapshot.approvals;
     }
-    return item.approvals.find((approval) => approval.state === 'pending')?.stage ?? null;
+    return activeApprovals(item);
   });
 
   beginEdit(): void {
     const item = this.change();
-    if (!item) {
+    if (!item || isExecutionFrozen(item)) {
       return;
     }
     this.draft.set(structuredClone(item));
+    this.editBaseVersion.set(item.version);
     this.editing.set(true);
   }
 
   cancelEdit(): void {
     this.editing.set(false);
     this.draft.set(null);
+    this.editBaseVersion.set(null);
+  }
+
+  /** 保存失败/发现过期后，放弃旧草稿，以最近有效执行版本重新进入编辑。 */
+  recoverFromConflict(): void {
+    const item = this.change();
+    if (!item) {
+      return;
+    }
+    this.store.dispatch(ChangeRequestActions.dismissSaveConflict({ id: this.changeId }));
+    this.draft.set(null);
+    this.editBaseVersion.set(null);
+    this.editing.set(false);
+    if (!isExecutionFrozen(item)) {
+      this.draft.set(structuredClone(item));
+      this.editBaseVersion.set(item.version);
+      this.editing.set(true);
+    }
+  }
+
+  dismissConflict(): void {
+    this.store.dispatch(ChangeRequestActions.dismissSaveConflict({ id: this.changeId }));
   }
 
   updateDraft<K extends keyof ChangeRequest>(key: K, value: ChangeRequest[K]): void {
@@ -1055,12 +1396,20 @@ export class ChangeDetailComponent {
 
   saveEdit(): void {
     const draft = this.draft();
-    if (!draft) {
+    const baseVersion = this.editBaseVersion();
+    const item = this.change();
+    if (!draft || baseVersion === null || !item) {
       return;
     }
-    this.store.dispatch(ChangeRequestActions.updateChange({ change: draft }));
-    this.editing.set(false);
-    this.draft.set(null);
+    // 执行版本冻结后，旧页面保存一律拒绝，不允许覆盖冻结版本。
+    if (isExecutionFrozen(item)) {
+      this.recoverFromConflict();
+      return;
+    }
+    this.store.dispatch(
+      ChangeRequestActions.updateChange({ change: draft, baseVersion }),
+    );
+    // 若版本不匹配（旧页面），store 保留最近有效版本并给出对账提示；编辑态保留以便重试或恢复。
   }
 
   submitForReview(): void {
@@ -1073,12 +1422,7 @@ export class ChangeDetailComponent {
     const approver = this.approver().trim() || '当前用户';
     const comment = this.approvalComment().trim() || '同意按方案执行。';
     this.store.dispatch(
-      ChangeRequestActions.approveStage({
-        id: this.changeId,
-        stage,
-        approver,
-        comment,
-      }),
+      ChangeRequestActions.approveStage({ id: this.changeId, stage, approver, comment }),
     );
     this.clearApprovalForm();
   }
@@ -1090,12 +1434,7 @@ export class ChangeDetailComponent {
       return;
     }
     this.store.dispatch(
-      ChangeRequestActions.rejectStage({
-        id: this.changeId,
-        stage,
-        approver,
-        comment,
-      }),
+      ChangeRequestActions.rejectStage({ id: this.changeId, stage, approver, comment }),
     );
     this.clearApprovalForm();
   }
@@ -1108,27 +1447,47 @@ export class ChangeDetailComponent {
     this.store.dispatch(ChangeRequestActions.toggleStep({ id: this.changeId, stepId }));
   }
 
-  recordDeviation(): void {
+  decisionButtonLabel(): string {
+    const decision = this.deviationDecision();
+    return decision === 'pause'
+      ? '记录暂停并失效关联审批'
+      : decision === 'rollback'
+        ? '记录回滚并失效关联审批'
+        : decision === 'resume'
+          ? '继续执行'
+          : '记录继续观察';
+  }
+
+  recordDecision(): void {
+    const item = this.change();
+    if (!item) {
+      return;
+    }
     const description = this.deviationText().trim();
     if (!description) {
       return;
     }
-    const deviation: DeviationRecord = {
-      id: `dev-${Date.now()}`,
-      recordedAt: new Date().toISOString(),
-      owner: this.change()?.onCall[0] ?? '当前用户',
-      description,
-      decision: this.deviationDecision(),
-    };
-    this.store.dispatch(ChangeRequestActions.recordDeviation({ id: this.changeId, deviation }));
+    const eventId = `evt-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    this.store.dispatch(
+      ChangeRequestActions.recordExecutionDecision({
+        id: this.changeId,
+        owner: item.onCall[0] ?? item.owner ?? '当前用户',
+        description,
+        decision: this.deviationDecision(),
+        eventId,
+      }),
+    );
     this.deviationText.set('');
+    this.deviationDecision.set(
+      item.status === 'paused' ? 'resume' : 'continue',
+    );
   }
 
   complete(result: 'completed' | 'rolled_back'): void {
     const note =
       result === 'completed'
         ? '观察窗口内指标稳定，变更完成。'
-        : '发现不可接受影响，按方案完成回滚。';
+        : '发现不可接受影响，按冻结方案完成回滚。';
     this.store.dispatch(ChangeRequestActions.completeExecution({ id: this.changeId, result, note }));
   }
 
@@ -1137,7 +1496,7 @@ export class ChangeDetailComponent {
     if (!item) {
       return;
     }
-    const blob = new Blob([this.service.exportRetrospective(item)], {
+    const blob = new Blob([this.service.exportRetrospective(item, this.changes())], {
       type: 'text/markdown;charset=utf-8',
     });
     const url = URL.createObjectURL(blob);
@@ -1149,11 +1508,38 @@ export class ChangeDetailComponent {
   }
 
   stepsBy(change: ChangeRequest): ChangeStep[] {
+    const source = change.executionSnapshot?.steps ?? change.steps;
     const order: ChangeStep['phase'][] = ['prepare', 'execute', 'verify', 'rollback'];
-    return [...change.steps].sort((left, right) => {
+    return [...source].sort((left, right) => {
       const phase = order.indexOf(left.phase) - order.indexOf(right.phase);
       return phase || left.id.localeCompare(right.id);
     });
+  }
+
+  frozenWindow(change: ChangeRequest): ChangeRequest['window'] {
+    return change.executionSnapshot?.window ?? change.window;
+  }
+
+  sharedResourceNames(related: ChangeRequest): string {
+    const item = this.change();
+    if (!item) {
+      return related.resources.map((resource) => resource.name).join('、');
+    }
+    return related.resources
+      .filter((resource) => item.resources.some((owned) => owned.id === resource.id))
+      .map((resource) => resource.name)
+      .join('、');
+  }
+
+  invalidatedStageLabels(related: ChangeRequest): string {
+    const item = this.change();
+    if (!item) {
+      return '';
+    }
+    const stages = invalidatedApprovals(related)
+      .filter((approval) => approval.invalidatedByChangeId === item.id)
+      .map((approval) => STAGE_LABELS[approval.stage]);
+    return [...new Set(stages)].join('、');
   }
 
   completedSteps(change: ChangeRequest): number {
@@ -1186,6 +1572,7 @@ export class ChangeDetailComponent {
       approved: '已批准',
       rejected: '已退回',
       frozen: '已冻结',
+      invalidated: '已失效',
     }[state];
   }
 
@@ -1195,20 +1582,16 @@ export class ChangeDetailComponent {
       return '-';
     }
     if (item.status === 'approved') {
-      return '已批准，等待执行';
+      return '已批准，等待执行冻结';
     }
-    if (['executing', 'completed', 'rolled_back'].includes(item.status)) {
-      return '审批已冻结';
+    if (isExecutionFrozen(item)) {
+      return '审批已冻结（以执行版本为准）';
     }
     return '方案草稿';
   }
 
-  decisionLabel(decision: DeviationRecord['decision']): string {
-    return {
-      continue: '继续观察',
-      pause: '暂停执行',
-      rollback: '立即回滚',
-    }[decision];
+  decisionLabel(decision: DeviationDecision): string {
+    return DECISION_LABELS[decision];
   }
 
   private clearApprovalForm(): void {
