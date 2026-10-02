@@ -19,16 +19,26 @@ import {
   ChangeRequest,
   ChangeStep,
   DeviationRecord,
+  EXECUTION_EVENT_LABELS,
+  ExecutionControl,
+  ExecutionEventRecord,
   PHASE_LABELS,
   RESOURCE_LABELS,
   RISK_LABELS,
   STAGE_LABELS,
   STATUS_LABELS,
+  isExecutionLocked,
+  isExecutionPaused,
   validateChange,
 } from '../../models/change-request.model';
 import { ChangeRequestService } from '../../services/change-request.service';
 import { ChangeRequestActions } from '../../store/change-request.actions';
-import { selectAllChanges } from '../../store/change-request.selectors';
+import {
+  selectAffectedRelatedChanges,
+  selectAllChanges,
+  selectLastSaveError,
+  selectSaveErrorFor,
+} from '../../store/change-request.selectors';
 
 type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval' | 'audit';
 
@@ -76,6 +86,32 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
         </div>
       </section>
 
+      @if (saveError()) {
+        <clr-alert clrAlertType="warning" [clrAlertClosable]="true" (clrAlertClosedChange)="dismissSaveError()">
+          <clr-alert-item>
+            <span class="alert-text">{{ saveError() }}</span>
+          </clr-alert-item>
+        </clr-alert>
+      }
+      @if (lastSaveError()) {
+        <clr-alert clrAlertType="danger" [clrAlertClosable]="false">
+          <clr-alert-item>
+            <span class="alert-text">
+              保存失败，已恢复到最近有效执行版本：{{ lastSaveError() }}
+            </span>
+          </clr-alert-item>
+        </clr-alert>
+      }
+      @if (locked()) {
+        <div class="frozen-banner">
+          <strong>执行版本已冻结</strong>
+          <span>
+            开始执行于 {{ item.frozenSnapshot?.frozenAt | date: 'yyyy-MM-dd HH:mm' }}，
+            执行与复盘以冻结版本 v{{ item.frozenSnapshot?.version }} 为准；窗口、资源和会签不得修改。
+          </span>
+        </div>
+      }
+
       <nav class="tab-nav" aria-label="变更详情">
         @for (tab of tabs; track tab.id) {
           <button
@@ -104,9 +140,9 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   class="btn btn-sm"
                   type="button"
                   (click)="editing() ? cancelEdit() : beginEdit()"
-                  [disabled]="item.status === 'executing' || item.status === 'completed'"
+                  [disabled]="locked()"
                 >
-                  {{ editing() ? '取消编辑' : '编辑方案' }}
+                  {{ editing() ? '取消编辑' : locked() ? '方案已冻结' : '编辑方案' }}
                 </button>
               </div>
 
@@ -165,19 +201,19 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               } @else {
                 <dl class="facts">
                   <div>
-                    <dt>执行窗口</dt>
+                    <dt>执行窗口（{{ locked() ? '冻结版本' : '当前版本' }}）</dt>
                     <dd>
-                      {{ item.window.start | date: 'yyyy-MM-dd HH:mm' }} 至
-                      {{ item.window.end | date: 'yyyy-MM-dd HH:mm' }}
+                      {{ (locked() ? item.frozenSnapshot?.window.start : item.window.start) | date: 'yyyy-MM-dd HH:mm' }} 至
+                      {{ (locked() ? item.frozenSnapshot?.window.end : item.window.end) | date: 'yyyy-MM-dd HH:mm' }}
                     </dd>
                   </div>
                   <div>
                     <dt>观察窗口</dt>
-                    <dd>{{ item.window.observationWindowMinutes }} 分钟</dd>
+                    <dd>{{ (locked() ? item.frozenSnapshot?.window.observationWindowMinutes : item.window.observationWindowMinutes) }} 分钟</dd>
                   </div>
                   <div>
                     <dt>值守人员</dt>
-                    <dd>{{ item.onCall.join('、') }}</dd>
+                    <dd>{{ (locked() ? item.frozenSnapshot?.onCall.join('、') : item.onCall.join('、')) }}</dd>
                   </div>
                   <div>
                     <dt>当前门禁</dt>
@@ -258,11 +294,16 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               <div class="surface-heading">
                 <div>
                   <h2>执行步骤</h2>
-                  <span>执行中可逐项勾选，所有操作保留时间戳</span>
+                  <span>
+                    执行中可逐项勾选，所有操作保留时间戳
+                    @if (paused()) {
+                      <strong class="paused-flag">（已暂停，步骤勾选已锁定）</strong>
+                    }
+                  </span>
                 </div>
                 @if (item.status === 'approved') {
                   <button class="btn btn-primary" type="button" (click)="startExecution()">
-                    开始执行
+                    开始执行（冻结方案与会签）
                   </button>
                 }
               </div>
@@ -272,7 +313,7 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                     <input
                       type="checkbox"
                       [checked]="step.completed"
-                      [disabled]="item.status !== 'executing'"
+                      [disabled]="item.status !== 'executing' || paused()"
                       (change)="toggleStep(step.id)"
                     />
                     <span class="phase">{{ phaseLabel(step.phase) }}</span>
@@ -299,40 +340,96 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                 </a>
               </div>
               @if (item.status === 'executing') {
-                <div class="deviation-form">
-                  <clr-textarea-container>
-                    <label>偏离说明</label>
-                    <textarea
-                      clrTextarea
-                      rows="3"
-                      [ngModel]="deviationText()"
-                      (ngModelChange)="deviationText.set($event)"
-                      placeholder="描述实际执行与方案差异"
-                    ></textarea>
-                  </clr-textarea-container>
-                  <div class="deviation-actions">
-                    <clr-select-container>
-                      <label>处置决定</label>
-                      <select
-                        clrSelect
-                        [ngModel]="deviationDecision()"
-                        (ngModelChange)="deviationDecision.set($event)"
-                      >
-                        <option value="continue">继续观察</option>
-                        <option value="pause">暂停执行</option>
-                        <option value="rollback">立即回滚</option>
-                      </select>
-                    </clr-select-container>
-                    <button class="btn" type="button" (click)="recordDeviation()">记录偏离</button>
-                  </div>
-                </div>
-                <div class="completion-actions">
-                  <button class="btn" type="button" (click)="complete('rolled_back')">判定回滚</button>
-                  <button class="btn btn-primary" type="button" (click)="complete('completed')">
-                    执行完成
-                  </button>
+                <div class="execution-controls">
+                  @if (paused()) {
+                    <div class="paused-strip">
+                      <strong>执行已暂停</strong>
+                      <span>暂停已通知共享资源上的关联变更，其未开始的会签失效；恢复后继续按冻结版本执行。</span>
+                    </div>
+                    <clr-textarea-container>
+                      <label>继续执行说明</label>
+                      <textarea
+                        clrTextarea
+                        rows="2"
+                        [ngModel]="controlNote()"
+                        (ngModelChange)="controlNote.set($event)"
+                        placeholder="说明恢复依据（可留空）"
+                      ></textarea>
+                    </clr-textarea-container>
+                    <div class="completion-actions">
+                      <button class="btn" type="button" (click)="controlExecution('rollback')">
+                        判定回滚
+                      </button>
+                      <button class="btn btn-primary" type="button" (click)="controlExecution('resume')">
+                        继续执行
+                      </button>
+                    </div>
+                  } @else {
+                    <div class="deviation-form">
+                      <clr-textarea-container>
+                        <label>偏离 / 控制说明</label>
+                        <textarea
+                          clrTextarea
+                          rows="3"
+                          [ngModel]="deviationText()"
+                          (ngModelChange)="deviationText.set($event)"
+                          placeholder="描述实际执行与方案差异；选择暂停或回滚将级联通知关联变更"
+                        ></textarea>
+                      </clr-textarea-container>
+                      <div class="deviation-actions">
+                        <clr-select-container>
+                          <label>处置决定</label>
+                          <select
+                            clrSelect
+                            [ngModel]="deviationDecision()"
+                            (ngModelChange)="deviationDecision.set($event)"
+                          >
+                            <option value="continue">继续观察</option>
+                            <option value="pause">暂停执行</option>
+                            <option value="rollback">立即回滚</option>
+                          </select>
+                        </clr-select-container>
+                        <button class="btn" type="button" (click)="recordDeviation()">记录偏离</button>
+                      </div>
+                    </div>
+                    <clr-input-container class="control-note">
+                      <label>暂停/回滚原因（快捷按钮必填）</label>
+                      <input
+                        clrInput
+                        [ngModel]="controlNote()"
+                        (ngModelChange)="controlNote.set($event)"
+                        placeholder="例如：核心交换机 B 平面光模块告警，暂停等待备件"
+                      />
+                    </clr-input-container>
+                    <div class="completion-actions">
+                      <button class="btn" type="button" (click)="controlExecution('rollback')" [disabled]="!controlNote().trim()">
+                        判定回滚
+                      </button>
+                      <button class="btn" type="button" (click)="controlExecution('pause')" [disabled]="!controlNote().trim()">
+                        暂停执行
+                      </button>
+                      <button class="btn btn-primary" type="button" (click)="complete('completed')">
+                        执行完成
+                      </button>
+                    </div>
+                  }
                 </div>
               }
+
+              <h3 class="timeline-title">执行事件</h3>
+              <ol class="event-timeline">
+                @for (event of item.executionEvents; track event.id) {
+                  <li [class]="event.type">
+                    <strong>{{ executionEventLabel(event.type) }}</strong>
+                    <time>{{ event.timestamp | date: 'MM-dd HH:mm' }} · {{ event.actor }}</time>
+                    <p>{{ event.note }}</p>
+                  </li>
+                } @empty {
+                  <p class="empty">尚未开始执行。</p>
+                }
+              </ol>
+
+              <h3 class="timeline-title">执行偏离</h3>
               <div class="deviation-list">
                 @for (deviation of item.deviations; track deviation.id) {
                   <article>
@@ -348,6 +445,45 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                 }
               </div>
             </section>
+
+            @if (affectedRelated().length) {
+              <section class="surface span-2">
+                <div class="surface-heading">
+                  <div>
+                    <h2>关联变更会签失效通知</h2>
+                    <span>暂停或回滚后，共享资源上尚未开始的关联变更审批失效，须重新确认</span>
+                  </div>
+                </div>
+                <div class="affected-table">
+                  @for (related of affectedRelated(); track related.id) {
+                    <article>
+                      <div>
+                        <strong>{{ related.id }} {{ related.title }}</strong>
+                        <span>当前状态：{{ statusLabel(related.status) }}</span>
+                      </div>
+                      <ul>
+                        @for (inv of related.invalidations; track inv.id) {
+                          @if (inv.sourceChangeId === item.id) {
+                            <li>
+                              {{ stageLabel(inv.stage) }} ·
+                              {{ invalidationReason(inv.reason) }} ·
+                              原审批人 {{ inv.approver || '-' }} ·
+                              @if (inv.reconfirmedAt) {
+                                <em class="reconfirmed">
+                                  已由 {{ inv.reconfirmer }} 于 {{ inv.reconfirmedAt | date: 'MM-dd HH:mm' }} 重新确认
+                                </em>
+                              } @else {
+                                <em class="pending-reconfirm">等待重新确认</em>
+                              }
+                            </li>
+                          }
+                        }
+                      </ul>
+                    </article>
+                  }
+                </div>
+              </section>
+            }
           </div>
         }
 
@@ -375,7 +511,12 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   <li [ngClass]="approval.state">
                     <span class="flow-index">{{ $index + 1 }}</span>
                     <div>
-                      <strong>{{ stageLabel(approval.stage) }}</strong>
+                      <strong>
+                        {{ stageLabel(approval.stage) }}
+                        @if (approval.state === 'invalidated') {
+                          <em class="state-flag invalidated">已失效</em>
+                        }
+                      </strong>
                       <p>
                         {{ approval.comment || approvalStateText(approval.state) }}
                       </p>
@@ -438,18 +579,71 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               <div class="surface-heading">
                 <div>
                   <h2>审批冻结快照</h2>
-                  <span>执行与复盘以冻结版本为准</span>
+                  <span>
+                    @if (item.frozenSnapshot) {
+                      执行与复盘以冻结版本 v{{ item.frozenSnapshot.version }} 为准（{{ item.frozenSnapshot.frozenAt | date: 'yyyy-MM-dd HH:mm' }} 冻结）
+                    } @else {
+                      开始执行后生成，执行与复盘以冻结版本为准
+                    }
+                  </span>
                 </div>
               </div>
               <div class="freeze-strip">
-                @for (approval of item.approvals; track approval.stage) {
+                @for (approval of (item.frozenSnapshot?.approvals ?? item.approvals); track approval.stage) {
                   <div>
                     <span>{{ stageLabel(approval.stage) }}</span>
-                    <strong>{{ approvalStateText(approval.state) }}</strong>
+                    <strong>{{ approvalStateText(locked() ? 'frozen' : approval.state) }}</strong>
+                    @if (approval.approver) {
+                      <small>{{ approval.approver }}</small>
+                    }
                   </div>
                 }
               </div>
+              @if (item.frozenSnapshot) {
+                <dl class="facts compact">
+                  <div>
+                    <dt>冻结窗口</dt>
+                    <dd>
+                      {{ item.frozenSnapshot.window.start | date: 'yyyy-MM-dd HH:mm' }} 至
+                      {{ item.frozenSnapshot.window.end | date: 'yyyy-MM-dd HH:mm' }}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>冻结资源范围</dt>
+                    <dd>
+                      {{ item.frozenSnapshot.resources.map((r) => r.name).join('、') || '无' }}
+                    </dd>
+                  </div>
+                </dl>
+              }
             </section>
+
+            @if (item.invalidations.length) {
+              <section class="surface span-2">
+                <div class="surface-heading">
+                  <div>
+                    <h2>失效审批记录</h2>
+                    <span>因共享资源关联变更暂停或回滚而失效，按网络、系统、安全、业务顺序重新确认</span>
+                  </div>
+                </div>
+                <div class="invalidation-list">
+                  @for (inv of item.invalidations; track inv.id) {
+                    <article>
+                      <strong>{{ stageLabel(inv.stage) }}</strong>
+                      <span>{{ invalidationReason(inv.reason) }}（{{ inv.sourceChangeId }}）</span>
+                      <small>原审批人：{{ inv.approver || '-' }} · 失效于 {{ inv.invalidatedAt | date: 'MM-dd HH:mm' }}</small>
+                      @if (inv.reconfirmedAt) {
+                        <em class="reconfirmed">
+                          已由 {{ inv.reconfirmer }} 于 {{ inv.reconfirmedAt | date: 'MM-dd HH:mm' }} 重新确认
+                        </em>
+                      } @else {
+                        <em class="pending-reconfirm">等待重新确认</em>
+                      }
+                    </article>
+                  }
+                </div>
+              </section>
+            }
           </div>
         }
 
@@ -480,8 +674,24 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   <dd>{{ statusLabel(item.status) }}</dd>
                 </div>
                 <div>
+                  <dt>冻结版本</dt>
+                  <dd>{{ item.frozenSnapshot ? 'v' + item.frozenSnapshot.version : '未冻结' }}</dd>
+                </div>
+                <div>
+                  <dt>执行事件</dt>
+                  <dd>{{ item.executionEvents.length }} 条（暂停/继续/回滚）</dd>
+                </div>
+                <div>
                   <dt>执行偏离</dt>
                   <dd>{{ item.deviations.length }} 条</dd>
+                </div>
+                <div>
+                  <dt>失效审批</dt>
+                  <dd>{{ item.invalidations.length }} 项</dd>
+                </div>
+                <div>
+                  <dt>受影响关联变更</dt>
+                  <dd>{{ affectedRelated().length }} 项</dd>
                 </div>
                 <div>
                   <dt>审计事件</dt>
@@ -494,7 +704,10 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               </dl>
               <div class="retrospective-note">
                 <strong>导出内容</strong>
-                <p>包含变更窗口、资源范围、执行偏离、最终状态和完整审计轨迹。</p>
+                <p>
+                  包含冻结版本与窗口、会签快照、执行事件（暂停/继续/回滚）、执行偏离、
+                  失效审批与重新确认、关联变更影响和完整审计轨迹。
+                </p>
               </div>
             </section>
           </div>
@@ -924,6 +1137,178 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
         color: #5f5f5f;
       }
 
+      .frozen-banner {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin: 16px 0;
+        padding: 12px 16px;
+        border-left: 3px solid #4b8d65;
+        background: #edf7f0;
+        color: #245f3d;
+      }
+
+      .frozen-banner span {
+        font-size: 12px;
+      }
+
+      .paused-flag {
+        color: #8e260f;
+      }
+
+      .paused-strip {
+        margin-bottom: 12px;
+        padding: 12px 14px;
+        border-left: 3px solid #d0a251;
+        background: #fff7e6;
+      }
+
+      .paused-strip span {
+        display: block;
+        margin-top: 4px;
+        color: #7c5000;
+        font-size: 12px;
+      }
+
+      .execution-controls {
+        padding-bottom: 12px;
+        border-bottom: 1px solid #e3e3e3;
+      }
+
+      .control-note {
+        margin-top: 8px;
+      }
+
+      .timeline-title {
+        margin: 18px 0 8px;
+        font-size: 14px;
+      }
+
+      .event-timeline {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .event-timeline li {
+        padding: 10px 0 10px 14px;
+        border-left: 2px solid #cfd8de;
+      }
+
+      .event-timeline li.pause {
+        border-left-color: #d0a251;
+      }
+
+      .event-timeline li.rollback {
+        border-left-color: #c21d00;
+      }
+
+      .event-timeline li.resume {
+        border-left-color: #4b8d65;
+      }
+
+      .event-timeline li.complete {
+        border-left-color: #4b8d65;
+      }
+
+      .event-timeline time {
+        margin-left: 8px;
+        color: #737373;
+        font-size: 11px;
+      }
+
+      .event-timeline p {
+        margin: 4px 0 0;
+        color: #5f5f5f;
+        font-size: 12px;
+      }
+
+      .approval-flow li.invalidated .flow-index {
+        border-color: #d0a251;
+        background: #fff7e6;
+        color: #7c5000;
+      }
+
+      .approval-flow li.frozen .flow-index {
+        border-color: #4b8d65;
+        background: #e8f5ed;
+        color: #245f3d;
+      }
+
+      .state-flag.invalidated {
+        margin-left: 8px;
+        padding: 1px 6px;
+        background: #fff7e6;
+        color: #7c5000;
+        font-size: 11px;
+        font-style: normal;
+      }
+
+      .freeze-strip small {
+        margin-top: 3px;
+        color: #737373;
+        font-size: 10px;
+      }
+
+      .invalidation-list article {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 0;
+        border-bottom: 1px solid #e6e6e6;
+        font-size: 13px;
+      }
+
+      .invalidation-list article:last-child {
+        border-bottom: 0;
+      }
+
+      .invalidation-list span {
+        color: #7c5000;
+      }
+
+      .invalidation-list small {
+        color: #737373;
+      }
+
+      .reconfirmed {
+        color: #245f3d;
+        font-style: normal;
+      }
+
+      .pending-reconfirm {
+        color: #8e260f;
+        font-style: normal;
+      }
+
+      .affected-table article {
+        padding: 12px 0;
+        border-bottom: 1px solid #e6e6e6;
+      }
+
+      .affected-table article:last-child {
+        border-bottom: 0;
+      }
+
+      .affected-table article > div {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .affected-table article > div span {
+        color: #7c5000;
+        font-size: 12px;
+      }
+
+      .affected-table ul {
+        margin: 8px 0 0;
+        padding-left: 18px;
+        color: #5f5f5f;
+        font-size: 12px;
+      }
+
       .empty {
         color: #737373;
       }
@@ -980,13 +1365,21 @@ export class ChangeDetailComponent {
 
   readonly changes = this.store.selectSignal(selectAllChanges);
   readonly change = computed(() => this.changes().find((item) => item.id === this.changeId));
+  readonly saveError = this.store.selectSignal(selectSaveErrorFor(this.changeId));
+  readonly lastSaveError = this.store.selectSignal(selectLastSaveError);
+  readonly affectedRelated = this.store.selectSignal(
+    selectAffectedRelatedChanges(this.changeId),
+  );
   readonly selectedTab = signal<DetailTab>('overview');
   readonly editing = signal(false);
+  /** 开始编辑时读到的版本号，保存时做乐观并发校验。 */
+  readonly baseVersion = signal(1);
   readonly draft = signal<ChangeRequest | null>(null);
   readonly approver = signal('');
   readonly approvalComment = signal('');
   readonly deviationText = signal('');
   readonly deviationDecision = signal<DeviationRecord['decision']>('continue');
+  readonly controlNote = signal('');
 
   readonly tabs: Array<{ id: DetailTab; label: string }> = [
     { id: 'overview', label: '方案概览' },
@@ -1015,21 +1408,37 @@ export class ChangeDetailComponent {
     if (rejected) {
       return rejected.stage;
     }
-    return item.approvals.find((approval) => approval.state === 'pending')?.stage ?? null;
+    return (
+      item.approvals.find(
+        (approval) => approval.state === 'pending' || approval.state === 'invalidated',
+      )?.stage ?? null
+    );
+  });
+
+  readonly locked = computed(() => {
+    const item = this.change();
+    return item ? isExecutionLocked(item) : false;
+  });
+
+  readonly paused = computed(() => {
+    const item = this.change();
+    return item ? isExecutionPaused(item) : false;
   });
 
   beginEdit(): void {
     const item = this.change();
-    if (!item) {
+    if (!item || isExecutionLocked(item)) {
       return;
     }
     this.draft.set(structuredClone(item));
+    this.baseVersion.set(item.version);
     this.editing.set(true);
   }
 
   cancelEdit(): void {
     this.editing.set(false);
     this.draft.set(null);
+    this.dismissSaveError();
   }
 
   updateDraft<K extends keyof ChangeRequest>(key: K, value: ChangeRequest[K]): void {
@@ -1058,9 +1467,16 @@ export class ChangeDetailComponent {
     if (!draft) {
       return;
     }
-    this.store.dispatch(ChangeRequestActions.updateChange({ change: draft }));
+    // 冻结后或版本过期时 reducer 会拒绝并写 saveErrors，页面立即恢复为最近有效版本
+    this.store.dispatch(
+      ChangeRequestActions.updateChange({ change: draft, baseVersion: this.baseVersion() }),
+    );
     this.editing.set(false);
     this.draft.set(null);
+  }
+
+  dismissSaveError(): void {
+    this.store.dispatch(ChangeRequestActions.clearSaveError({ id: this.changeId }));
   }
 
   submitForReview(): void {
@@ -1104,7 +1520,19 @@ export class ChangeDetailComponent {
     this.store.dispatch(ChangeRequestActions.startExecution({ id: this.changeId }));
   }
 
+  controlExecution(control: ExecutionControl): void {
+    const note = this.controlNote().trim();
+    if (control !== 'resume' && !note) {
+      return;
+    }
+    this.store.dispatch(ChangeRequestActions.controlExecution({ id: this.changeId, control, note }));
+    this.controlNote.set('');
+  }
+
   toggleStep(stepId: string): void {
+    if (this.paused()) {
+      return;
+    }
     this.store.dispatch(ChangeRequestActions.toggleStep({ id: this.changeId, stepId }));
   }
 
@@ -1137,7 +1565,7 @@ export class ChangeDetailComponent {
     if (!item) {
       return;
     }
-    const blob = new Blob([this.service.exportRetrospective(item)], {
+    const blob = new Blob([this.service.exportRetrospective(item, this.changes())], {
       type: 'text/markdown;charset=utf-8',
     });
     const url = URL.createObjectURL(blob);
@@ -1186,7 +1614,16 @@ export class ChangeDetailComponent {
       approved: '已批准',
       rejected: '已退回',
       frozen: '已冻结',
+      invalidated: '已失效，需重新确认',
     }[state];
+  }
+
+  executionEventLabel(type: ExecutionEventRecord['type']): string {
+    return EXECUTION_EVENT_LABELS[type];
+  }
+
+  invalidationReason(reason: 'paused' | 'rolled_back'): string {
+    return reason === 'paused' ? '关联变更暂停' : '关联变更回滚';
   }
 
   approvalGate(): string {

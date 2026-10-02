@@ -10,9 +10,16 @@ export type ChangeStatus =
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
 export type ResourceType = 'datacenter' | 'rack' | 'network' | 'storage' | 'service';
 export type ApprovalStage = 'network' | 'system' | 'security' | 'business';
-export type ApprovalState = 'pending' | 'approved' | 'rejected' | 'frozen';
+export type ApprovalState =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'frozen'
+  | 'invalidated';
 export type StepPhase = 'prepare' | 'execute' | 'verify' | 'rollback';
 export type IssueSeverity = 'blocker' | 'warning' | 'info';
+export type ExecutionControl = 'pause' | 'resume' | 'rollback';
+export type ExecutionEventType = 'start' | 'pause' | 'resume' | 'rollback' | 'complete';
 
 export interface ChangeResource {
   id: string;
@@ -56,6 +63,38 @@ export interface DeviationRecord {
   decision: 'continue' | 'pause' | 'rollback';
 }
 
+export interface ExecutionEventRecord {
+  id: string;
+  type: ExecutionEventType;
+  timestamp: string;
+  actor: string;
+  note: string;
+}
+
+export interface InvalidationRecord {
+  id: string;
+  sourceChangeId: string;
+  stage: ApprovalStage;
+  approver?: string;
+  reason: 'paused' | 'rolled_back';
+  invalidatedAt: string;
+  reconfirmedAt?: string;
+  reconfirmer?: string;
+}
+
+export interface ExecutionSnapshot {
+  frozenAt: string;
+  title: string;
+  summary: string;
+  owner: string;
+  onCall: string[];
+  window: ChangeWindow;
+  resources: ChangeResource[];
+  steps: ChangeStep[];
+  approvals: ApprovalRecord[];
+  version: number;
+}
+
 export interface AuditRecord {
   id: string;
   timestamp: string;
@@ -77,7 +116,11 @@ export interface ChangeRequest {
   window: ChangeWindow;
   approvals: ApprovalRecord[];
   deviations: DeviationRecord[];
+  executionEvents: ExecutionEventRecord[];
+  invalidations: InvalidationRecord[];
+  frozenSnapshot?: ExecutionSnapshot;
   audit: AuditRecord[];
+  version: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -166,9 +209,91 @@ export function createEmptyChange(): ChangeRequest {
     },
     approvals: createEmptyApprovals(),
     deviations: [],
+    executionEvents: [],
+    invalidations: [],
     audit: [],
+    version: 1,
     createdAt: now.toISOString(),
     updatedAt: now.toISOString(),
+  };
+}
+
+/** 兼容旧版本 localStorage 数据，补齐执行冻结相关字段。 */
+export function normalizeChange(raw: ChangeRequest): ChangeRequest {
+  const normalized: ChangeRequest = {
+    ...raw,
+    approvals: APPROVAL_ORDER.map((stage) => {
+      const found = raw.approvals?.find((approval) => approval.stage === stage);
+      return found ?? { stage, state: 'pending' as const };
+    }),
+    deviations: raw.deviations ?? [],
+    executionEvents: raw.executionEvents ?? [],
+    invalidations: raw.invalidations ?? [],
+    frozenSnapshot: raw.frozenSnapshot,
+    audit: raw.audit ?? [],
+    version: typeof raw.version === 'number' && raw.version > 0 ? raw.version : 1,
+  };
+  return normalized;
+}
+
+/** 执行已开始：方案与会签以冻结快照为准，窗口等不允许再编辑。 */
+export function isExecutionLocked(change: ChangeRequest): boolean {
+  return change.executionEvents.length > 0 || !!change.frozenSnapshot;
+}
+
+/** 最近一次执行控制事件为暂停且尚未恢复/回滚。 */
+export function isExecutionPaused(change: ChangeRequest): boolean {
+  const latest = change.executionEvents[0];
+  return change.status === 'executing' && latest?.type === 'pause';
+}
+
+export function sharesResource(left: ChangeRequest, right: ChangeRequest): boolean {
+  return left.resources.some((resource) =>
+    right.resources.some((candidate) => candidate.id === resource.id)
+  );
+}
+
+export function sharedResourceNames(left: ChangeRequest, right: ChangeRequest): string[] {
+  return left.resources
+    .filter((resource) => right.resources.some((candidate) => candidate.id === resource.id))
+    .map((resource) => resource.name);
+}
+
+export function createExecutionEvent(
+  type: ExecutionEventType,
+  note: string,
+  actor = '当前用户',
+): ExecutionEventRecord {
+  return {
+    id: `evt-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    type,
+    timestamp: new Date().toISOString(),
+    actor,
+    note,
+  };
+}
+
+export const EXECUTION_EVENT_LABELS: Record<ExecutionEventType, string> = {
+  start: '开始执行',
+  pause: '暂停执行',
+  resume: '继续执行',
+  rollback: '执行回滚',
+  complete: '执行完成',
+};
+
+/** 生成开始执行时刻的方案+会签冻结快照（深拷贝，避免后续编辑污染）。 */
+export function buildExecutionSnapshot(change: ChangeRequest): ExecutionSnapshot {
+  return {
+    frozenAt: new Date().toISOString(),
+    title: change.title,
+    summary: change.summary,
+    owner: change.owner,
+    onCall: [...change.onCall],
+    window: { ...change.window },
+    resources: structuredClone(change.resources),
+    steps: structuredClone(change.steps),
+    approvals: structuredClone(change.approvals),
+    version: change.version,
   };
 }
 
